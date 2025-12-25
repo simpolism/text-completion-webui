@@ -925,9 +925,9 @@ def stream_generator(generation_id):
             'model': model_str,
             'max_tokens': config['max_tokens'],
             'temperature': config['temperature'],
-            'system': "The assistant is in CLI simulation mode, and responds to the user's CLI commands only with the output of the command.",
+            'system': "CLI inputs are indicated by <cmd> tags.",
             'messages': [
-                {'role': 'user', 'content': f"<cmd>cat untitled.txt</cmd> (5.8 KB)"},
+                {'role': 'user', 'content': f"<cmd>cat untitled.log</cmd>"},
                 {'role': 'assistant', 'content': prompt}
             ],
             'stream': True
@@ -1301,9 +1301,9 @@ def get_seed():
                 'model': model_str,
                 'max_tokens': config['max_tokens'],
                 'temperature': config['temperature'],
-                'system': "The assistant is in CLI simulation mode, and responds to the user's CLI commands only with the output of the command.",
+                'system': "CLI inputs are indicated by <cmd> tags.",
                 'messages': [
-                    {'role': 'user', 'content': f"<cmd>cat untitled.txt</cmd> (5.8 KB)"},
+                    {'role': 'user', 'content': f"<cmd>cat untitled.log</cmd>"},
                     {'role': 'assistant', 'content': SEED_PROMPT}
                 ],
                 'stream': True
