@@ -692,12 +692,12 @@
         
         .CodeMirror {
             height: 100% !important;
-            font-family: 'Source Code Pro', 'Courier New', monospace;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             font-size: 16px;
             line-height: 1.6;
             padding: 20px;
         }
-        
+
         /* Textarea editor styling */
         #editor-textarea {
             width: 100%;
@@ -707,7 +707,7 @@
             padding: 20px;
             resize: none;
             font-size: 16px;
-            font-family: 'Source Code Pro', 'Courier New', monospace;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             line-height: 1.6;
             transition: background-color 0.3s ease, color 0.3s ease;
             background-color: var(--bg-secondary);
@@ -717,6 +717,28 @@
         
         #editor-textarea:focus {
             outline: none;
+        }
+
+        /* Prompt vs Generated text styling */
+        .prompt-text {
+            color: var(--text-secondary);
+        }
+
+        .generated-text {
+            color: var(--text-primary);
+        }
+
+        /* Contenteditable styling */
+        #editor-textarea[contenteditable] {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-y: auto;
+        }
+
+        #editor-textarea[contenteditable]:empty:before {
+            content: attr(placeholder);
+            color: var(--text-secondary);
+            opacity: 0.6;
         }
         
         /* Button Row */

@@ -15,6 +15,7 @@ let settingsDirty = false;  // Track if settings have changed since last save
 let suppressInputHandler = false;  // Prevent input handler during programmatic changes
 let pendingDocumentLoad = null;  // Track which document is being loaded (prevent race conditions)
 let documentContentCache = new Map();  // Cache document contents for instant switching
+let promptBoundary = -1;  // Track where prompt ends and generated text begins (-1 = no styling)
 
 // Cache DOM elements
 const domElements = {
@@ -72,29 +73,47 @@ function initEditor() {
     } else {
         editorWrapper.innerHTML = '';
     }
-    
-    // Create textarea element
-    const textarea = document.createElement('textarea');
-    textarea.id = 'editor-textarea';
-    textarea.className = 'editor-textarea';
-    textarea.spellcheck = false;
-    
-    editorWrapper.appendChild(textarea);
-    editor = textarea;
-    
+
+    // Create contenteditable div element for styled text support
+    const editorDiv = document.createElement('div');
+    editorDiv.id = 'editor-textarea';
+    editorDiv.className = 'editor-textarea';
+    editorDiv.contentEditable = 'true';
+    editorDiv.spellcheck = false;
+    editorDiv.setAttribute('placeholder', 'Start writing...');
+
+    editorWrapper.appendChild(editorDiv);
+    editor = editorDiv;
+
     // Track content changes and auto-save after 2s of no typing (backend handles 30s max)
     editor.addEventListener('input', function() {
         if (!currentDocument || suppressInputHandler) return;
-        
-        const currentContent = editor.value;
+
+        const currentContent = getEditorText();
         if (currentContent === lastContent) return;
-        
-        // Clear the checkpoint when user makes changes
+
+        // Clear the checkpoint and prompt boundary when user makes changes
         lastCheckpoint = null;
-        
+        promptBoundary = -1;
+
+        // Clear styling on user edit - convert to plain text
+        if (editor.querySelector('.prompt-text') || editor.querySelector('.generated-text')) {
+            suppressInputHandler = true;
+            const plainText = getEditorText();
+            editor.textContent = plainText;
+            // Restore cursor to end
+            const range = document.createRange();
+            const sel = window.getSelection();
+            range.selectNodeContents(editor);
+            range.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            suppressInputHandler = false;
+        }
+
         // Update lastContent immediately to prevent duplicate saves
         lastContent = currentContent;
-        
+
         // Cancel previous save timer and schedule new one (2s delay)
         if (window.saveTimer) {
             clearTimeout(window.saveTimer);
@@ -104,7 +123,7 @@ function initEditor() {
             window.saveTimer = null;
         }, 2000);  // 2s delay, backend handles 30s max during continuous typing
     });
-    
+
     // Add keyboard shortcuts
     editor.addEventListener('keydown', function(e) {
         // Ctrl/Cmd + Enter to submit
@@ -114,19 +133,19 @@ function initEditor() {
             }
             e.preventDefault();
         }
-        
-        // Tab key handling
+
+        // Tab key handling for contenteditable
         if (e.key === 'Tab') {
             e.preventDefault();
-            const start = this.selectionStart;
-            const end = this.selectionEnd;
-            
-            // Insert tab at cursor
-            this.value = this.value.substring(0, start) + '    ' + this.value.substring(end);
-            
-            // Put cursor after tab
-            this.selectionStart = this.selectionEnd = start + 4;
+            document.execCommand('insertText', false, '    ');
         }
+    });
+
+    // Handle paste to strip formatting
+    editor.addEventListener('paste', function(e) {
+        e.preventDefault();
+        const text = e.clipboardData.getData('text/plain');
+        document.execCommand('insertText', false, text);
     });
 }
 
@@ -144,13 +163,53 @@ function debounce(func, wait) {
 }
 
 /**
+ * Escape HTML special characters for safe insertion
+ */
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+/**
+ * Get plain text content from the editor (works with both textarea and contenteditable)
+ */
+function getEditorText() {
+    if (!editor) return '';
+    return editor.tagName === 'TEXTAREA' ? editor.value : (editor.textContent || '');
+}
+
+/**
+ * Set editor content with optional prompt/generated text styling
+ * @param {String} text - The full text content
+ * @param {Number} promptEnd - Position where prompt ends (-1 for no styling)
+ */
+function setEditorContent(text, promptEnd = -1) {
+    if (!editor) return;
+
+    if (editor.tagName === 'TEXTAREA') {
+        editor.value = text;
+        return;
+    }
+
+    // Contenteditable div
+    if (promptEnd > 0 && promptEnd < text.length) {
+        const promptText = text.substring(0, promptEnd);
+        const generatedText = text.substring(promptEnd);
+        editor.innerHTML = `<span class="prompt-text">${escapeHtml(promptText)}</span><span class="generated-text">${escapeHtml(generatedText)}</span>`;
+    } else {
+        editor.textContent = text;
+    }
+}
+
+/**
  * Save the current document content to the server
  * Now called directly without debounce since debouncing is handled at the input level
  */
 function saveCurrentDocument() {
     if (!currentDocument || !editor) return;
-    
-    const content = editor.value;
+
+    const content = getEditorText();
     
     // Update local state immediately
     currentDocument.content = content;
@@ -649,22 +708,23 @@ function applyDocumentToEditor(docId, document) {
     if (pendingDocumentLoad !== docId) {
         return; // User switched to different document, ignore this
     }
-    
+
     currentDocument = document;
-    
+
     // Update document name
     updateCurrentDocumentName(currentDocument.name);
-    
+
     // Initialize or update editor with document content
     if (!editor) {
         initEditor();
     }
-    
+
     // Set editor content and update lastContent
     const content = currentDocument.content || '';
-    if (editor.value !== content) {
+    if (getEditorText() !== content) {
         suppressInputHandler = true;
-        editor.value = content;
+        promptBoundary = -1;  // Reset styling on document load
+        setEditorContent(content);
         lastContent = content;
         suppressInputHandler = false;
     }
@@ -934,65 +994,60 @@ function updateSubmitButtonState(provider) {
  */
 function startStreaming(generationId) {
     let generatedText = '';
-    const originalText = editor.value;
-    
+    const originalText = getEditorText();
+
+    // Set prompt boundary for styling
+    promptBoundary = originalText.length;
+
     // Show cancel button and hide submit button during generation
     domElements.cancelBtn.style.display = 'block';
     domElements.submitBtn.style.display = 'none';
-    
+
     const eventSource = new EventSource(`/stream/${generationId}`);
     
     eventSource.onmessage = function(event) {
         const data = JSON.parse(event.data);
         
         if (data.text) {
-            // Performance optimization: use insertAdjacentText for incremental updates
-            const wasAtEnd = editor.selectionStart === editor.value.length;
             const currentScroll = editor.scrollTop;
             const scrollAtBottom = editor.scrollTop >= (editor.scrollHeight - editor.clientHeight - 10);
-            
+
             generatedText += data.text;
-            
+
             // For large documents, minimize DOM manipulation
-            if (editor.value.length > 50000) {
+            const fullText = originalText + generatedText;
+            if (fullText.length > 50000) {
                 // Batch updates: only update every 10 chunks or when done
                 if (!window.streamUpdateBatch) {
                     window.streamUpdateBatch = { count: 0, pendingText: '' };
                 }
                 window.streamUpdateBatch.pendingText += data.text;
                 window.streamUpdateBatch.count++;
-                
+
                 // Update every 10 chunks for large documents
                 if (window.streamUpdateBatch.count >= 10) {
-                    editor.value = originalText + generatedText;
+                    setEditorContent(fullText, promptBoundary);
                     window.streamUpdateBatch = { count: 0, pendingText: '' };
-                    
-                    // Restore position only if user was at end
-                    if (wasAtEnd) {
-                        editor.selectionStart = editor.selectionEnd = editor.value.length;
-                    }
+
                     if (scrollAtBottom) {
                         editor.scrollTop = editor.scrollHeight;
                     }
                 }
             } else {
-                // Normal update for smaller documents
-                editor.value = originalText + generatedText;
-                
-                // Restore cursor and scroll positions
-                if (wasAtEnd) {
-                    editor.selectionStart = editor.selectionEnd = editor.value.length;
-                }
+                // Normal update for smaller documents - use styled content
+                setEditorContent(fullText, promptBoundary);
+
+                // Restore scroll position
                 if (scrollAtBottom) {
                     editor.scrollTop = editor.scrollHeight;
                 } else {
                     editor.scrollTop = currentScroll;
                 }
             }
-            
+
             // Update lastContent to prevent input handler from triggering
             // Backend will save immediately after generation completes
-            lastContent = originalText + generatedText;
+            lastContent = fullText;
         }
         
         // Handle auto-rename event
@@ -1050,12 +1105,9 @@ function startStreaming(generationId) {
         if (data.done) {
             // Flush any pending batched updates for large documents
             if (window.streamUpdateBatch && window.streamUpdateBatch.count > 0) {
-                editor.value = originalText + generatedText;
-                const wasAtEnd = editor.selectionStart === editor.value.length;
-                if (wasAtEnd) {
-                    editor.selectionStart = editor.selectionEnd = editor.value.length;
-                    editor.scrollTop = editor.scrollHeight;
-                }
+                const fullText = originalText + generatedText;
+                setEditorContent(fullText, promptBoundary);
+                editor.scrollTop = editor.scrollHeight;
                 window.streamUpdateBatch = null;
             }
             
@@ -1078,9 +1130,9 @@ function startStreaming(generationId) {
         // Handle error in generation
         if (data.error) {
             console.error('Error in generation:', data.error);
-            
+
             // Save any partial content before closing
-            if (editor.value !== lastCheckpoint) {
+            if (getEditorText() !== lastCheckpoint) {
                 saveCurrentDocument();
             }
             
@@ -1115,9 +1167,9 @@ function startStreaming(generationId) {
     
     eventSource.onerror = function(error) {
         console.error('Error in text generation stream:', error);
-        
+
         // Save any partial content before closing
-        if (editor.value !== lastCheckpoint) {
+        if (getEditorText() !== lastCheckpoint) {
             saveCurrentDocument();
         }
         
@@ -1646,16 +1698,16 @@ document.addEventListener('DOMContentLoaded', function() {
     
     domElements.submitBtn.addEventListener('click', function() {
         if (!editor || !currentDocument) return;
-        
+
         // Disable submit button
         this.disabled = true;
-        
+
         // Ensure settings are saved with current accordion values before generation
         // This guarantees the generation uses the selected provider/model
         autoSaveSettings();
-        
+
         // Get content and strip trailing spaces from each line while preserving newlines
-        const content = editor.value
+        const content = getEditorText()
             .split('\n')
             .map(line => line.trimEnd())
             .join('\n')
@@ -1701,10 +1753,10 @@ document.addEventListener('DOMContentLoaded', function() {
     if (domElements.copyAllBtn) {
         domElements.copyAllBtn.addEventListener('click', async function() {
             if (!editor) return;
-            
+
             try {
                 // Use Clipboard API for reliable copying of entire content
-                await navigator.clipboard.writeText(editor.value);
+                await navigator.clipboard.writeText(getEditorText());
                 
                 // Visual feedback
                 const originalHTML = this.innerHTML;
@@ -1713,9 +1765,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     this.innerHTML = originalHTML;
                 }, 1000);
             } catch (err) {
-                // Fallback: select all and copy
-                editor.select();
+                // Fallback: select all and copy for contenteditable
+                const range = document.createRange();
+                range.selectNodeContents(editor);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
                 document.execCommand('copy');
+                sel.removeAllRanges();
                 console.error('Clipboard API failed, used fallback:', err);
             }
         });
@@ -1855,10 +1912,11 @@ document.addEventListener('DOMContentLoaded', function() {
     // Add reroll button handler
     domElements.rerollBtn.addEventListener('click', function() {
         if (!lastCheckpoint) return;
-        
+
         // Restore editor to checkpoint and save (removes generated text)
         suppressInputHandler = true;
-        editor.value = lastCheckpoint;
+        promptBoundary = -1;  // Clear styling
+        setEditorContent(lastCheckpoint);
         lastContent = lastCheckpoint;
         suppressInputHandler = false;
         saveCurrentDocument(); // Must save to sync reverted state to backend
@@ -1892,8 +1950,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Duplicate in new document button handler
     domElements.duplicateBtn.addEventListener('click', function() {
         if (!currentDocument || !editor) return;
-        
-        const content = editor.value;
+
+        const content = getEditorText();
         const originalName = currentDocument.name;
         const newName = `${originalName} (copy)`;
         
@@ -1965,8 +2023,8 @@ document.addEventListener('DOMContentLoaded', function() {
     // Seed button handler - generates starter text
     domElements.seedBtn.addEventListener('click', async function() {
         if (!editor || !currentDocument) return;
-        
-        const currentContent = editor.value.trim();
+
+        const currentContent = getEditorText().trim();
         if (currentContent.length >= 1000) {
             if (!confirm('This will replace your entire document. Are you sure?')) {
                 return;
@@ -2021,7 +2079,8 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Clear editor and save checkpoint
         suppressInputHandler = true;
-        editor.value = '';
+        promptBoundary = -1;
+        setEditorContent('');
         lastContent = '';
         lastCheckpoint = '';
         suppressInputHandler = false;
